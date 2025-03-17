@@ -1,14 +1,28 @@
 #!/bin/bash
 
+# Stop and remove existing services
+sudo systemctl stop aria2.service webui.service
+sudo systemctl disable aria2.service webui.service
+sudo rm -f /etc/systemd/system/aria2.service /etc/systemd/system/webui.service
+sudo rm -rf /home/leon/.aria2 /home/leon/webui /var/www/ariang
+
+# Remove installed packages
+sudo apt remove --purge -y nginx aria2 firefox xrdp samba nodejs npm
+sudo apt autoremove -y
+
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install necessary packages
-sudo apt install -y nginx aria2 filebrowser firefox xrdp samba nodejs npm
+# Reinstall necessary packages
+sudo apt install -y nginx aria2 firefox xrdp samba nodejs npm
+
+# Install FileBrowser manually
+curl -fsSL https://github.com/filebrowser/filebrowser/releases/latest/download/linux-arm64-filebrowser.tar.gz | sudo tar -xz -C /usr/local/bin filebrowser
+sudo chmod +x /usr/local/bin/filebrowser
 
 # Set up Aria2 configuration
-mkdir -p ~/.aria2
-cat <<EOF > ~/.aria2/aria2.conf
+mkdir -p /home/leon/.aria2
+cat <<EOF > /home/leon/.aria2/aria2.conf
 dir=/home/leon/Downloads
 file-allocation=none
 continue=true
@@ -39,13 +53,13 @@ sudo systemctl enable aria2.service
 sudo systemctl start aria2.service
 
 # Install AriaNg
-mkdir -p /var/www/ariang
+sudo mkdir -p /var/www/ariang
 cd /var/www/ariang
-wget -qO- https://github.com/mayswind/AriaNg/releases/latest/download/AriaNg.zip | sudo busybox unzip -
+sudo wget -qO- https://github.com/mayswind/AriaNg/releases/latest/download/AriaNg.zip | sudo busybox unzip -
 sudo chown -R www-data:www-data /var/www/ariang
 
 # Configure Nginx for AriaNg and File Browser
-cat <<EOF | sudo tee /etc/nginx/sites-available/default
+sudo tee /etc/nginx/sites-available/default <<EOF
 server {
     listen 80;
     server_name _;
@@ -56,22 +70,21 @@ server {
     }
 
     location /files {
-        proxy_pass http://0.0.0.0:8080/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass http://127.0.0.1:8080/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 
     location /webui {
-        proxy_pass http://0.0.0.0:3000/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_pass http://127.0.0.1:3000/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 }
 EOF
-sudo ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/
 sudo systemctl restart nginx
 
-# Start File Browser accessible to all
+# Start File Browser on port 8080
 sudo filebrowser -r /home/leon/Downloads -p 8080 --address 0.0.0.0 &
 
 # Set up Samba for file sharing
@@ -89,9 +102,6 @@ mkdir -p /home/leon/webui
 cd /home/leon/webui
 npx create-next-app@latest . --use-npm --typescript
 npm install axios lucide-react @shadcn/ui recharts
-
-# Copy React UI code (assumes it's in ~/webui)
-echo "Paste your React UI code into /home/leon/webui/app/page.tsx"
 
 # Create systemd service for web UI
 cat <<EOF | sudo tee /etc/systemd/system/webui.service
@@ -112,3 +122,8 @@ EOF
 # Enable and start Web UI service
 sudo systemctl enable webui.service
 sudo systemctl start webui.service
+
+echo "Setup complete! Access your services:"
+echo "  - AriaNg:       http://<RaspberryPi_IP>/ariang"
+echo "  - File Browser: http://<RaspberryPi_IP>/files"
+echo "  - Web UI:       http://<RaspberryPi_IP>/webui"
