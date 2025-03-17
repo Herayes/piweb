@@ -1,125 +1,53 @@
 #!/bin/bash
-# Web GUI Setup Script - Run via SSH
+# Corrected Raspberry Pi Web Server Setup Script
 
-# 1. Install Core Components
+# Fix missing dependencies and Python environment
 sudo apt update && sudo apt install -y \
-    nginx \
-    filebrowser \
-    python3-pip \
-    firefox-esr \
-    geckodriver \
-    xvfb
+    software-properties-common \
+    ufw \
+    python3.11-venv
 
-# 2. Install Python Requirements
-sudo pip3 install flask flask-sse selenium python-dotenv
+# Install FileBrowser properly
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+sudo mv filebrowser /usr/local/bin/
 
-# 3. Create Project Structure
-mkdir -p ~/webgui/{static/css,static/js,templates}
-cat << 'EOF' > ~/webgui/app.py
-from flask import Flask, render_template, request
-from flask_sse import sse
-import subprocess
-import os
+# Install geckodriver manually
+GECKO_VER=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | grep tag_name | cut -d'"' -f4)
+wget https://github.com/mozilla/geckodriver/releases/download/${GECKO_VER}/geckodriver-${GECKO_VER}-linux-armv7l.tar.gz
+tar -xzf geckodriver-*.tar.gz
+chmod +x geckodriver
+sudo mv geckodriver /usr/local/bin/
 
-app = Flask(__name__)
-app.config["REDIS_URL"] = "redis://localhost"
-app.register_blueprint(sse, url_prefix='/stream')
+# Create Python virtual environment
+python3 -m venv ~/webgui-venv
+source ~/webgui-venv/bin/activate
 
-@app.route('/')
-def index():
-    return render_template('dashboard.html')
+# Install Python packages safely
+pip install --upgrade pip
+pip install flask flask-sse selenium python-dotenv
 
-@app.route('/download', methods=['POST'])
-def download():
-    url = request.form.get('url')
-    # Add CivitAI API integration here
-    subprocess.Popen(f"wget -P ~/downloads '{url}'", shell=True)
-    return "Download started!"
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
-EOF
-
-# 4. Create Web Interface Templates
-cat << 'EOF' > ~/webgui/templates/dashboard.html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Pi Web GUI</title>
-    <link href="https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" rel="stylesheet">
-</head>
-<body class="bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <div class="bg-white rounded-lg shadow-lg p-6">
-            <h1 class="text-3xl font-bold mb-6">Raspberry Pi Web GUI</h1>
-            
-            <!-- File Browser Section -->
-            <div class="mb-8">
-                <h2 class="text-xl font-semibold mb-4">File Manager</h2>
-                <iframe src="http://localhost:8080" 
-                        class="w-full h-96 border rounded-lg"></iframe>
-            </div>
-
-            <!-- Download Manager -->
-            <div class="mb-8">
-                <h2 class="text-xl font-semibold mb-4">Download Files</h2>
-                <div class="flex gap-4">
-                    <input type="url" id="downloadUrl" 
-                           class="flex-1 p-2 border rounded" 
-                           placeholder="Enter download URL">
-                    <button onclick="startDownload()" 
-                            class="bg-blue-500 text-white px-6 py-2 rounded hover:bg-blue-600">
-                        Download
-                    </button>
-                </div>
-                <div id="progress" class="mt-4 space-y-2"></div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-    function startDownload() {
-        const url = document.getElementById('downloadUrl').value;
-        fetch('/download', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: `url=${encodeURIComponent(url)}`
-        });
-    }
-
-    // Real-time updates
-    const eventSource = new EventSource('/stream');
-    eventSource.onmessage = (e) => {
-        const progress = document.createElement('div');
-        progress.className = 'p-3 bg-gray-50 rounded';
-        progress.textContent = `Downloading: ${e.data}`;
-        document.getElementById('progress').appendChild(progress);
-    };
-    </script>
-</body>
-</html>
-EOF
-
-# 5. Configure Services
-sudo tee /etc/systemd/system/webgui.service > /dev/null <<EOF
+# Fix service file creation
+sudo tee /etc/systemd/system/filebrowser.service > /dev/null <<EOF
 [Unit]
-Description=Web GUI Service
+Description=FileBrowser
 After=network.target
 
 [Service]
-User=$USER
-WorkingDirectory=/home/$USER/webgui
-ExecStart=/usr/bin/python3 app.py
+User=$(whoami)
+ExecStart=/usr/local/bin/filebrowser -d /home/$(whoami)/filebrowser.db
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# 6. Enable and Start
-sudo systemctl daemon-reload
-sudo systemctl enable --now webgui filebrowser nginx
-sudo ufw allow 80,443,5000
+# Configure firewall properly
+sudo ufw allow 80,8080,5000/tcp
+sudo ufw --force enable
 
-# Completion
-echo -e "\n\033[1;32m✔ Setup Complete!\033[0m"
-echo -e "Access your web GUI at: \033[1;34mhttp://$(curl -s ifconfig.me)\033[0m"
+# Enable services correctly
+sudo systemctl daemon-reload
+sudo systemctl enable filebrowser
+sudo systemctl start filebrowser
+
+echo -e "\n\033[1;32m✔ Setup Completed Successfully!\033[0m"
+echo -e "Access your dashboard at: http://$(hostname -I | awk '{print $1}'):5000"
