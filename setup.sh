@@ -1,106 +1,114 @@
 #!/bin/bash
-# Raspberry Pi Web Server Full Setup Script
-# Run via: curl -sL https://raw.githubusercontent.com/Herayes/piweb/main/setup.sh | bash
 
-# Error handling and cleanup
-set -e
-trap 'echo -e "\n\033[1;31m» ERROR at line $LINENO! «\033[0m"; exit 1' ERR
-sudo rm -rf /tmp/pi-setup
-mkdir -p /tmp/pi-setup
+# Update system
+sudo apt update && sudo apt upgrade -y
 
-# System Configuration
-USER=$(whoami)
-IP=$(hostname -I | awk '{print $1}')
-FB_DB="/home/$USER/filebrowser.db"
-VENV_DIR="/home/$USER/webgui-venv"
+# Install necessary packages
+sudo apt install -y nginx aria2 filebrowser firefox xrdp samba nodejs npm
 
-# Install Core Dependencies
-echo -e "\n\033[1;34m» Installing system dependencies...\033[0m"
-sudo apt update && sudo apt install -y \
-    nginx \
-    firefox-esr \
-    python3.11-venv \
-    wget \
-    tar \
-    ufw
+# Set up Aria2 configuration
+mkdir -p ~/.aria2
+cat <<EOF > ~/.aria2/aria2.conf
+dir=/home/leon/Downloads
+file-allocation=none
+continue=true
+max-concurrent-downloads=5
+log=/var/log/aria2.log
+input-file=/home/leon/.aria2/session
+save-session=/home/leon/.aria2/session
+rpc-allow-origin-all=true
+rpc-listen-all=true
+rpc-secret=changeme
+EOF
 
-# Install FileBrowser
-echo -e "\n\033[1;34m» Installing FileBrowser...\033[0m"
-curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-sudo mv filebrowser /usr/local/bin/
-
-# Install geckodriver
-echo -e "\n\033[1;34m» Installing geckodriver...\033[0m"
-GECKO_VER=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | grep tag_name | cut -d'"' -f4)
-wget -q https://github.com/mozilla/geckodriver/releases/download/${GECKO_VER}/geckodriver-${GECKO_VER}-linux-armv7l.tar.gz -P /tmp/pi-setup
-tar -xzf /tmp/pi-setup/geckodriver-*.tar.gz -C /tmp/pi-setup
-chmod +x /tmp/pi-setup/geckodriver
-sudo mv /tmp/pi-setup/geckodriver /usr/local/bin/
-
-# Python Environment Setup
-echo -e "\n\033[1;34m» Configuring Python environment...\033[0m"
-python3 -m venv $VENV_DIR
-source $VENV_DIR/bin/activate
-pip install --upgrade pip
-pip install flask flask-sse selenium python-dotenv
-
-# FileBrowser Service Setup
-echo -e "\n\033[1;34m» Configuring services...\033[0m"
-sudo tee /etc/systemd/system/filebrowser.service > /dev/null <<EOF
+# Enable Aria2 service
+cat <<EOF | sudo tee /etc/systemd/system/aria2.service
 [Unit]
-Description=FileBrowser
+Description=Aria2c Daemon
 After=network.target
 
 [Service]
-User=$USER
-ExecStart=/usr/local/bin/filebrowser -d $FB_DB --root /home/$USER/files
+ExecStart=/usr/bin/aria2c --enable-rpc --conf-path=/home/leon/.aria2/aria2.conf
+Restart=always
+User=leon
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable aria2.service
+sudo systemctl start aria2.service
+
+# Install AriaNg
+mkdir -p /var/www/ariang
+cd /var/www/ariang
+wget -qO- https://github.com/mayswind/AriaNg/releases/latest/download/AriaNg.zip | sudo busybox unzip -
+sudo chown -R www-data:www-data /var/www/ariang
+
+# Configure Nginx for AriaNg and File Browser
+cat <<EOF | sudo tee /etc/nginx/sites-available/default
+server {
+    listen 80;
+    server_name _;
+
+    location /ariang {
+        root /var/www;
+        index index.html;
+    }
+
+    location /files {
+        proxy_pass http://0.0.0.0:8080/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /webui {
+        proxy_pass http://0.0.0.0:3000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+EOF
+sudo ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/
+sudo systemctl restart nginx
+
+# Start File Browser accessible to all
+sudo filebrowser -r /home/leon/Downloads -p 8080 --address 0.0.0.0 &
+
+# Set up Samba for file sharing
+cat <<EOF | sudo tee -a /etc/samba/smb.conf
+[Downloads]
+   path = /home/leon/Downloads
+   read only = no
+   browsable = yes
+   guest ok = yes
+EOF
+sudo systemctl restart smbd
+
+# Install web interface
+mkdir -p /home/leon/webui
+cd /home/leon/webui
+npx create-next-app@latest . --use-npm --typescript
+npm install axios lucide-react @shadcn/ui recharts
+
+# Copy React UI code (assumes it's in ~/webui)
+echo "Paste your React UI code into /home/leon/webui/app/page.tsx"
+
+# Create systemd service for web UI
+cat <<EOF | sudo tee /etc/systemd/system/webui.service
+[Unit]
+Description=Web UI Service
+After=network.target
+
+[Service]
+WorkingDirectory=/home/leon/webui
+ExecStart=/usr/bin/npm start -- -H 0.0.0.0
+Restart=always
+User=leon
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Nginx Configuration
-sudo tee /etc/nginx/sites-available/webgui > /dev/null <<EOF
-server {
-    listen 80;
-    server_name _;
-
-    location / {
-        proxy_pass http://localhost:5000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-    }
-
-    location /files {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host \$host;
-    }
-}
-EOF
-
-# Enable Services
-sudo ln -sf /etc/nginx/sites-available/webgui /etc/nginx/sites-enabled/
-sudo systemctl daemon-reload
-sudo systemctl enable --now filebrowser nginx
-
-# Firewall Configuration
-echo -e "\n\033[1;34m» Configuring firewall...\033[0m"
-sudo ufw allow 80,8080,5000/tcp
-sudo ufw allow ssh
-sudo ufw --force enable
-
-# Create File Structure
-mkdir -p /home/$USER/webgui/{static,templates}
-mkdir -p /home/$USER/files
-
-# Final Output
-echo -e "\n\033[1;32m✔ Setup Complete!\033[0m"
-echo -e "\n\033[1;33mAccess Information:\033[0m"
-echo -e "  Web Interface: \033[1;35mhttp://$IP\033[0m"
-echo -e "  File Manager:  \033[1;35mhttp://$IP/files\033[0m"
-echo -e "\n\033[1;33mManagement Commands:\033[0m"
-echo -e "  Restart Services: sudo systemctl restart filebrowser nginx"
-echo -e "  View Logs:        journalctl -u filebrowser -f"
-
-# Cleanup
-sudo rm -rf /tmp/pi-setup
+# Enable and start Web UI service
+sudo systemctl enable webui.service
+sudo systemctl start webui.service
